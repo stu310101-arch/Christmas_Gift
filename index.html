@@ -1,0 +1,1198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ASCII Christmas Tree 2026</title>
+<style>
+  *, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #02060a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+  }
+  #stage {
+    display: block;
+    background: #02060a;
+  }
+  #bgmToggle {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    z-index: 10;
+    background: rgba(2, 6, 10, 0.55);
+    border: 1px solid rgba(96, 104, 122, 0.45);
+    color: rgb(255, 196, 90);
+    font-family: Consolas, Menlo, "DejaVu Sans Mono", "Courier New", "Noto Sans TC", monospace;
+    font-size: 12px;
+    padding: 4px 9px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: border-color 0.2s, opacity 0.2s;
+    opacity: 0.85;
+  }
+  #bgmToggle:hover {
+    opacity: 1;
+    border-color: rgba(255, 196, 90, 0.75);
+  }
+  #bgmToggle.muted {
+    color: rgb(96, 104, 122);
+  }
+</style>
+</head>
+<body>
+<button id="bgmToggle" type="button" aria-label="Toggle Christmas Music">♪ 音樂：開</button>
+<canvas id="stage" aria-label="ASCII Christmas Tree 2026"></canvas>
+
+<script>
+(() => {
+  'use strict';
+
+  // =========================================================================
+  // Constants directly ported from christmas_tree.py
+  // =========================================================================
+  const COLS = 66;
+  const ROWS = 74;
+  const CW = 12;
+  const CH = 14;
+  const FONT_PX = 14;
+  const CJK_PX = 11.5;
+  const HUD_PX = 13;
+  const CANVAS_W = COLS * CW; // 792
+  const CANVAS_H = ROWS * CH; // 1036
+  const ASPECT = CW / CH;
+  const TAU = Math.PI * 2;
+
+  const GROUND = -1.48;
+  const Y0 = -0.86;
+  const Y1 = 1.34;
+
+  // Timeline (seconds) matching the video sequence
+  const T_GROW    = [1.0, 5.4];
+  const T_GARLAND = [5.4, 7.6];
+  const T_BALLS   = [7.6, 8.9];
+  const T_LIGHTS  = [8.2, 11.2];
+  const T_GIFTS   = [9.8, 12.2];
+  const T_STAR    = 12.2;
+  const T_MSG     = 13.1;
+
+  const MESSAGE = 'M E R R Y   C H R I S T M A S   2 0 2 6';
+
+  // Repeating Chinese greeting characters replacing the ASCII tree glyphs
+  const REPEAT_TEXT = '祝家祺聖誕快樂';
+  const REPEAT_LEN = REPEAT_TEXT.length;
+  function repeatCharCode(row, col) {
+    return REPEAT_TEXT.charCodeAt((col + row) % REPEAT_LEN);
+  }
+
+  // Colors (0..1 RGB) matching christmas_tree.py
+  const WHITE       = [0.95, 0.98, 1.00];
+  const GOLD        = [1.00, 0.84, 0.30];
+  const BAUBLE_GOLD = [1.00, 0.80, 0.25];
+  const SILVER      = [0.88, 0.92, 0.98];
+  const RED         = [0.98, 0.16, 0.18];
+  const BLUE        = [0.18, 0.46, 1.00];
+  const GREEN_BOX   = [0.18, 0.82, 0.36];
+  const WARM        = [1.00, 0.88, 0.50];
+  const TRUNK_COL   = [0.64, 0.37, 0.18];
+
+  const HUD_DIM    = 'rgb(96, 104, 122)';
+  const HUD_ACCENT = 'rgb(255, 196, 90)';
+  const HUD_SIGN   = 'rgb(176, 168, 196)';
+
+  // Particle types
+  const PT_NEEDLE = 0;
+  const PT_SNOW   = 1;
+  const PT_TRUNK  = 2;
+  const PT_TINSEL = 3;
+  const PT_BALL   = 4;
+  const PT_LIGHT  = 5;
+  const PT_GIFT   = 6;
+  const PT_GROUND = 7;
+
+  // =========================================================================
+  // Deterministic PRNG (Mulberry32, seeded to 7 like np.random.default_rng(7))
+  // =========================================================================
+  function createRng(seed) {
+    let a = seed >>> 0;
+    function next() {
+      a |= 0;
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    }
+    let spare = null;
+    return {
+      random: next,
+      uniform(lo, hi) {
+        return lo + (hi - lo) * next();
+      },
+      normal(mean = 0, std = 1) {
+        if (spare !== null) {
+          const v = spare;
+          spare = null;
+          return mean + std * v;
+        }
+        let u = 0, v = 0;
+        while (u === 0) u = next();
+        while (v === 0) v = next();
+        const mag = Math.sqrt(-2.0 * Math.log(u));
+        spare = mag * Math.sin(TAU * v);
+        return mean + std * (mag * Math.cos(TAU * v));
+      }
+    };
+  }
+
+  function clip(v, lo, hi) {
+    return v < lo ? lo : v > hi ? hi : v;
+  }
+
+  function smoothstep(x) {
+    const t = clip(x, 0, 1);
+    return t * t * (3 - 2 * t);
+  }
+
+  function envelope(y) {
+    const u = clip((y - Y0) / (Y1 - Y0), 0, 1);
+    return 0.96 * Math.pow(1 - u, 0.92);
+  }
+
+  function growTime(y) {
+    const f = clip((y - GROUND) / (Y1 - GROUND), 0, 1);
+    return T_GROW[0] + (T_GROW[1] - T_GROW[0]) * f;
+  }
+
+  function fibSphere(n) {
+    const pts = [];
+    const golden = Math.PI * (3 - Math.sqrt(5));
+    for (let i = 0; i < n; i++) {
+      const y = 1 - (i / (n - 1)) * 2;
+      const r = Math.sqrt(Math.max(0, 1 - y * y));
+      const theta = golden * i;
+      pts.push([Math.cos(theta) * r, y, Math.sin(theta) * r]);
+    }
+    return pts;
+  }
+
+  // =========================================================================
+  // Particle storage (Structure of Arrays for fast projection)
+  // =========================================================================
+  class Parts {
+    constructor(cap) {
+      this.cap = cap;
+      this.len = 0;
+      this.x     = new Float32Array(cap);
+      this.y     = new Float32Array(cap);
+      this.z     = new Float32Array(cap);
+      this.nx    = new Float32Array(cap);
+      this.ny    = new Float32Array(cap);
+      this.nz    = new Float32Array(cap);
+      this.r     = new Float32Array(cap);
+      this.g     = new Float32Array(cap);
+      this.b     = new Float32Array(cap);
+      this.type  = new Uint8Array(cap);
+      this.t0    = new Float32Array(cap);
+      this.base  = new Float32Array(cap);
+      this.phase = new Float32Array(cap);
+      this.cx    = new Float32Array(cap);
+      this.cy    = new Float32Array(cap);
+      this.cz    = new Float32Array(cap);
+      this.pop   = new Uint8Array(cap);
+    }
+
+    push(x, y, z, nx, ny, nz, r, g, b, type, t0, base = 1.0, phase = 0.0, cx = 0, cy = 0, cz = 0, pop = 0) {
+      const i = this.len;
+      if (i >= this.cap) return;
+      this.x[i] = x; this.y[i] = y; this.z[i] = z;
+      const nlen = Math.hypot(nx, ny, nz) || 1;
+      this.nx[i] = nx / nlen; this.ny[i] = ny / nlen; this.nz[i] = nz / nlen;
+      this.r[i] = r; this.g[i] = g; this.b[i] = b;
+      this.type[i] = type;
+      this.t0[i] = t0;
+      this.base[i] = base;
+      this.phase[i] = phase;
+      this.cx[i] = cx; this.cy[i] = cy; this.cz[i] = cz;
+      this.pop[i] = pop;
+      this.len = i + 1;
+    }
+  }
+
+  // =========================================================================
+  // Build the 3D scene faithfully following christmas_tree.py
+  // =========================================================================
+  function buildScene() {
+    const rng = createRng(7);
+    const q = new Parts(85000);
+    const tips = [];
+    const lightStartTimes = [];
+
+    // 1. Needles: 24 whorls of drooping branches, denser & longer at the bottom
+    const WHORLS = 24;
+    for (let i = 0; i < WHORLS; i++) {
+      const y = (Y0 + 0.02) + ((Y1 - 0.06) - (Y0 + 0.02)) * (i / (WHORLS - 1));
+      const u = (y - Y0) / (Y1 - Y0);
+      const R = envelope(y) + 0.05;
+      const nb = Math.floor(6 + 12 * (1 - u));
+
+      for (let b = 0; b < nb; b++) {
+        const a = TAU * (b + 0.5 * rng.random()) / nb + i * 0.77;
+        const L = R * rng.uniform(0.85, 1.08);
+        const n = Math.floor(25 + 240 * L);
+        const dx = Math.cos(a), dz = Math.sin(a);
+        const sx = -Math.sin(a), sz = Math.cos(a);
+
+        for (let k = 0; k < n; k++) {
+          const s = Math.pow(rng.random(), 0.65); // 0 trunk .. 1 tip
+          const spread = (0.025 + 0.09 * s) * rng.normal(0, 1);
+          const s1 = s * L;
+          const px = dx * s1 + sx * spread;
+          const pz = dz * s1 + sz * spread;
+          const py = y + 0.06 * s1 - 0.20 * s1 * s1 + 0.012 * rng.normal(0, 1);
+
+          const nrmX = dx * 0.75 + 0.3 * rng.normal(0, 1);
+          const nrmY = 0.55 + 0.3 * rng.normal(0, 1);
+          const nrmZ = dz * 0.75 + 0.3 * rng.normal(0, 1);
+          const nlen = Math.hypot(nrmX, nrmY, nrmZ) || 1;
+          const nyUnit = nrmY / nlen;
+
+          const ao = (0.35 + 0.70 * Math.pow(s, 1.25)) * rng.uniform(0.78, 1.12);
+          const isSnow = (s > 0.5) && (rng.random() < 0.06 * s) && (nyUnit > 0.5);
+
+          let cr, cg, cb, ptype, pbase;
+          if (isSnow) {
+            cr = WHITE[0]; cg = WHITE[1]; cb = WHITE[2];
+            ptype = PT_SNOW;
+            pbase = 1.05;
+          } else {
+            const gRand = rng.random();
+            cr = 0.10 + 0.14 * gRand;
+            cg = 0.50 + 0.42 * gRand;
+            cb = 0.18 + 0.16 * gRand;
+            ptype = PT_NEEDLE;
+            pbase = ao;
+          }
+          q.push(px, py, pz, nrmX, nrmY, nrmZ, cr, cg, cb, ptype, growTime(y) + 0.45 * s, pbase);
+        }
+
+        const tl = 0.93 * L;
+        tips.push([dx * tl, y + 0.06 * tl - 0.20 * tl * tl, dz * tl]);
+      }
+    }
+
+    // 2. Dark inner cone so nothing shows through the branches
+    const mCone = 6000;
+    for (let i = 0; i < mCone; i++) {
+      const y = Y0 + (Y1 - 0.1 - Y0) * rng.random();
+      const phi = rng.random() * TAU;
+      const r = 0.65 * envelope(y);
+      const px = Math.cos(phi) * r;
+      const pz = Math.sin(phi) * r;
+      q.push(px, y, pz, Math.cos(phi), 0.3, Math.sin(phi), 0.10, 0.44, 0.16, PT_NEEDLE, growTime(y), 0.75);
+    }
+
+    // 3. Trunk (taller & fuller warm brown bark)
+    const mTrunk = 2600;
+    for (let i = 0; i < mTrunk; i++) {
+      const y = GROUND + rng.random() * (Y0 + 0.14 - GROUND);
+      const phi = rng.random() * TAU;
+      const nx = Math.cos(phi), nz = Math.sin(phi);
+      const bark = 0.78 + 0.22 * Math.sign(Math.sin(phi * 26 + y * 5) || 1);
+      const rad = 0.135;
+      q.push(
+        nx * rad, y, nz * rad,
+        nx, 0, nz,
+        TRUNK_COL[0] * bark, TRUNK_COL[1] * bark, TRUNK_COL[2] * bark,
+        PT_TRUNK, growTime(y), 1.05
+      );
+    }
+
+    // 4. Tinsel garland: a gold spiral drooping in swags between hanging points
+    const tinselSteps = 2200;
+    const turns = 3.6;
+    for (let strand = 0; strand < 4; strand++) {
+      for (let i = 0; i < tinselSteps; i++) {
+        const u = i / (tinselSteps - 1);
+        const yg = Y0 + 0.15 + (Y1 - Y0 - 0.45) * u;
+        const ag = TAU * turns * u + 0.9;
+        const swag = -0.07 * Math.abs(Math.sin(ag * 2.5));
+        const rg = envelope(yg) + 0.07;
+        const jitter = 0.016;
+        const px = Math.cos(ag) * rg + jitter * rng.normal(0, 1);
+        const py = yg + swag + jitter * rng.normal(0, 1);
+        const pz = Math.sin(ag) * rg + jitter * rng.normal(0, 1);
+        const nx = Math.cos(ag) + 0.6 * rng.normal(0, 1);
+        const ny = 0.3 + 0.6 * rng.normal(0, 1);
+        const nz = Math.sin(ag) + 0.6 * rng.normal(0, 1);
+        const t0 = T_GARLAND[0] + u * (T_GARLAND[1] - T_GARLAND[0]);
+        q.push(px, py, pz, nx, ny, nz, GOLD[0], GOLD[1], GOLD[2], PT_TINSEL, t0, 1.0, rng.random() * TAU);
+      }
+    }
+
+    // 5. Baubles: 34 spheres (mostly red, some gold and silver)
+    const baubleSphere = fibSphere(110);
+    for (let k = 0; k < 34; k++) {
+      const u = (k + rng.random()) / 34;
+      const y = Y0 + 0.08 + u * (Y1 - Y0 - 0.38);
+      const a = k * 2.39996 + rng.random() * 0.4;
+      const env = envelope(y);
+      const cx = Math.cos(a) * env;
+      const cy = y - 0.03;
+      const cz = Math.sin(a) * env;
+      const rad = 0.058 + 0.032 * (1 - u);
+      const col = (k % 2 === 0) ? RED : (k % 5 === 1 ? SILVER : BAUBLE_GOLD);
+      const t0 = T_BALLS[0] + rng.random() * (T_BALLS[1] - T_BALLS[0]);
+      for (let j = 0; j < baubleSphere.length; j++) {
+        const s = baubleSphere[j];
+        q.push(
+          cx + s[0] * rad, cy + s[1] * rad, cz + s[2] * rad,
+          s[0], s[1], s[2],
+          col[0], col[1], col[2],
+          PT_BALL, t0, 1.0, 0.0, cx, cy, cz, 1
+        );
+      }
+    }
+
+    // 6. Fairy lights on branch tips (170 lights)
+    const tipIndices = tips.map((_, idx) => idx);
+    for (let i = tipIndices.length - 1; i > 0; i--) {
+      const j = Math.floor(rng.random() * (i + 1));
+      const tmp = tipIndices[i]; tipIndices[i] = tipIndices[j]; tipIndices[j] = tmp;
+    }
+    const numLights = Math.min(170, tips.length);
+    const bulbSphere = fibSphere(16);
+    for (let i = 0; i < numLights; i++) {
+      const tip = tips[tipIndices[i]];
+      const t0 = T_LIGHTS[0] + rng.random() * (T_LIGHTS[1] - T_LIGHTS[0]);
+      lightStartTimes.push(t0);
+      const col = rng.random() < 0.8 ? WARM : [1.0, 0.96, 0.88];
+      const ph = rng.random() * TAU;
+      for (let j = 0; j < bulbSphere.length; j++) {
+        const b = bulbSphere[j];
+        q.push(
+          tip[0] + b[0] * 0.032, tip[1] + b[1] * 0.032, tip[2] + b[2] * 0.032,
+          b[0], b[1], b[2],
+          col[0], col[1], col[2],
+          PT_LIGHT, t0, 1.0, ph, tip[0], tip[1], tip[2], 0
+        );
+      }
+    }
+    lightStartTimes.sort((a, b) => a - b);
+
+    // 7. Presents: 6 boxes with crossed ribbons and a bow
+    const gifts = [
+      [0.3, 1.12, 0.30, 0.24, 0.28, 0.4, RED,       GOLD],
+      [1.5, 1.18, 0.26, 0.30, 0.24, 1.1, BLUE,      GOLD],
+      [2.6, 1.10, 0.34, 0.18, 0.26, 1.0, GOLD,      RED],
+      [3.7, 1.18, 0.24, 0.26, 0.26, 0.3, RED,       WHITE],
+      [4.7, 1.12, 0.30, 0.22, 0.30, 0.1, GREEN_BOX, RED],
+      [5.6, 1.22, 0.22, 0.22, 0.22, 0.7, RED,       GOLD]
+    ];
+    const loopSphere = fibSphere(64);
+    const faceNormals = [
+      [0, 1, 0],
+      [1, 0, 0],
+      [-1, 0, 0],
+      [0, 0, 1],
+      [0, 0, -1]
+    ];
+
+    for (let gIdx = 0; gIdx < gifts.length; gIdx++) {
+      const [a, dist, w, h, d, rot, bodyCol, ribCol] = gifts[gIdx];
+      const gx = Math.cos(a) * dist;
+      const gz = Math.sin(a) * dist;
+      const cosR = Math.cos(rot), sinR = Math.sin(rot);
+      const t0 = T_GIFTS[0] + (gIdx / gifts.length) * (T_GIFTS[1] - T_GIFTS[0]);
+
+      const areas = [w * d, h * d, h * d, h * w, h * w];
+      const totalArea = areas.reduce((acc, v) => acc + v, 0);
+      const cdf = [];
+      let sumA = 0;
+      for (let f = 0; f < 5; f++) {
+        sumA += areas[f] / totalArea;
+        cdf.push(sumA);
+      }
+
+      const mGift = Math.floor(4200 * totalArea);
+      for (let k = 0; k < mGift; k++) {
+        const rf = rng.random();
+        let face = 4;
+        for (let f = 0; f < 5; f++) {
+          if (rf <= cdf[f]) { face = f; break; }
+        }
+        const fa = rng.random() - 0.5;
+        const fb = rng.random() - 0.5;
+        let lx, ly, lz;
+        if (face === 0) {
+          lx = fa * w; ly = h; lz = fb * d;
+        } else if (face === 1) {
+          lx = w * 0.5; ly = (fb + 0.5) * h; lz = fa * d;
+        } else if (face === 2) {
+          lx = -w * 0.5; ly = (fb + 0.5) * h; lz = fa * d;
+        } else if (face === 3) {
+          lx = fa * w; ly = (fb + 0.5) * h; lz = d * 0.5;
+        } else {
+          lx = fa * w; ly = (fb + 0.5) * h; lz = -d * 0.5;
+        }
+
+        const onX = Math.abs(lx) < 0.025;
+        const onZ = Math.abs(lz) < 0.025;
+        const isRibbon = (face === 0) ? (onX || onZ) : (face <= 2 ? onZ : onX);
+        const col = isRibbon ? ribCol : bodyCol;
+
+        const fn = faceNormals[face];
+        const rx = lx * cosR - lz * sinR;
+        const rz = lx * sinR + lz * cosR;
+        const rnx = fn[0] * cosR - fn[2] * sinR;
+        const rnz = fn[0] * sinR + fn[2] * cosR;
+
+        q.push(
+          gx + rx, GROUND + ly, gz + rz,
+          rnx, fn[1], rnz,
+          col[0], col[1], col[2],
+          PT_GIFT, t0, 1.0, 0.0, gx, GROUND + h * 0.5, gz, 1
+        );
+      }
+
+      // Bow loops on top of each gift
+      for (const sideSign of [-1, 1]) {
+        for (let j = 0; j < loopSphere.length; j++) {
+          const s = loopSphere[j];
+          const lx = s[0] * 0.05 + sideSign * 0.045;
+          const ly = s[1] * 0.03 + h + 0.025;
+          const lz = s[2] * 0.025;
+          const rx = lx * cosR - lz * sinR;
+          const rz = lx * sinR + lz * cosR;
+          const rnx = s[0] * cosR - s[2] * sinR;
+          const rnz = s[0] * sinR + s[2] * cosR;
+          q.push(
+            gx + rx, GROUND + ly, gz + rz,
+            rnx, s[1], rnz,
+            ribCol[0], ribCol[1], ribCol[2],
+            PT_GIFT, t0, 1.0, 0.0, gx, GROUND + h * 0.5, gz, 1
+          );
+        }
+      }
+    }
+
+    // 8. Perspective ground dot field (matches the subtle dotted floor in video)
+    const groundPts = [];
+    for (let row = 28; row < ROWS; row++) {
+      const frac = (row - 28) / (ROWS - 28); // 0 horizon .. 1 bottom
+      const step = frac < 0.25 ? 2 : (frac < 0.6 ? 2 : 1);
+      const bright = 0.22 + 0.34 * frac;
+      for (let col = (row % 2); col < COLS; col += step) {
+        if (rng.random() < 0.72) {
+          const jitter = 0.8 + 0.35 * rng.random();
+          groundPts.push({
+            row,
+            col,
+            r: Math.round(95 * bright * jitter),
+            g: Math.round(110 * bright * jitter),
+            b: Math.round(142 * bright * jitter),
+            z: 8.5 - frac * 6.0
+          });
+        }
+      }
+    }
+
+    // 9. Falling snow (background & foreground ASCII flakes)
+    const snow = [];
+    const SNOW_COUNT = 310;
+    for (let i = 0; i < SNOW_COUNT; i++) {
+      const layer = rng.random(); // 0 far .. 1 near
+      snow.push({
+        x: rng.random() * COLS,
+        y: rng.random() * ROWS,
+        vy: 1.5 + layer * 4.4,
+        vx: (rng.random() - 0.5) * 0.55,
+        phase: rng.random() * TAU,
+        amp: 0.4 + rng.random() * 1.1,
+        layer,
+        ch: layer > 0.72 ? '*' : (layer > 0.36 ? '+' : '.'),
+        bright: 0.45 + layer * 0.55
+      });
+    }
+
+    return { q, snow, groundPts, lightStartTimes };
+  }
+
+  // =========================================================================
+  // 3D Projection (calibrated to match frame_19.png proportions)
+  // =========================================================================
+  const CAM_DIST = 4.35;
+  const CAM_Y = 0.05;
+  const FOCAL = 84.0;
+  const CENTER_ROW = ROWS * 0.435;
+
+  function projectPoint(x, y, z, out) {
+    const dz = CAM_DIST - z;
+    if (dz <= 0.25) return false;
+    const invZ = FOCAL / dz;
+    out[0] = COLS * 0.5 + x * invZ;
+    out[1] = CENTER_ROW - (y - CAM_Y) * invZ * ASPECT;
+    out[2] = dz;
+    return true;
+  }
+
+  // =========================================================================
+  // 5-pointed star polygon & 8-ray burst (exact port of lines 359-424)
+  // =========================================================================
+  function pointInPoly(px, py, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const x1 = poly[i][0], y1 = poly[i][1];
+      const x2 = poly[j][0], y2 = poly[j][1];
+      const intersect = ((y1 > py) !== (y2 > py)) &&
+        (px < (x2 - x1) * (py - y1) / (y2 - y1 + 1e-9) + x1);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
+  function makeStarPoly(cx, cy, rOuter, rInner, aspect) {
+    const pts = [];
+    for (let i = 0; i < 10; i++) {
+      const ang = -Math.PI / 2 + i * (Math.PI / 5);
+      const rad = (i % 2 === 0) ? rOuter : rInner;
+      pts.push([
+        cx + Math.cos(ang) * rad / aspect,
+        cy + Math.sin(ang) * rad
+      ]);
+    }
+    return pts;
+  }
+
+  // =========================================================================
+  // Framebuffer (88 x 74 ASCII cells)
+  // =========================================================================
+  const TOTAL_CELLS = COLS * ROWS;
+  const charBuf = new Uint16Array(TOTAL_CELLS);
+  const rBuf    = new Uint8Array(TOTAL_CELLS);
+  const gBuf    = new Uint8Array(TOTAL_CELLS);
+  const bBuf    = new Uint8Array(TOTAL_CELLS);
+  const zBuf    = new Float32Array(TOTAL_CELLS);
+
+  function putCell(row, col, chCode, tint, intensity) {
+    if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return;
+    const idx = row * COLS + col;
+    charBuf[idx] = chCode;
+    rBuf[idx] = clip(Math.round(tint[0] * intensity * 255), 0, 255);
+    gBuf[idx] = clip(Math.round(tint[1] * intensity * 255), 0, 255);
+    bBuf[idx] = clip(Math.round(tint[2] * intensity * 255), 0, 255);
+  }
+
+  function drawStar(cx, cy, size, t, power, flash) {
+    const tint = [
+      GOLD[0] + (1 - GOLD[0]) * flash,
+      GOLD[1] + (1 - GOLD[1]) * flash,
+      GOLD[2] + (1 - GOLD[2]) * flash
+    ];
+    const pwr = power * (1 + 1.6 * flash);
+    const rayChars = ['-', '|', '/', '\\'];
+    const rayIdxMap = [0, 2, 1, 3];
+
+    // 8 rays (no rays pointing down into the tree)
+    for (let k = 0; k < 8; k++) {
+      const ang = k * TAU / 8 - 0.10 * Math.sin(t * 0.7);
+      if (Math.sin(ang) < -0.3) continue;
+      const reach = size * (2.6 + 0.7 * Math.sin(t * 3 + k * 1.3)) * (k % 2 === 0 ? 1.0 : 0.55);
+      const deg = ((ang * 180 / Math.PI) % 180 + 180) % 180;
+      const ch = rayChars[rayIdxMap[Math.round(deg / 45) % 4]].charCodeAt(0);
+
+      for (let s = size * 1.0; s < reach; s += 0.5) {
+        const y = Math.round(cy - Math.sin(ang) * s);
+        const x = Math.round(cx + Math.cos(ang) * s / ASPECT);
+        if (y >= 0 && y < ROWS && x >= 0 && x < COLS) {
+          const idx = y * COLS + x;
+          const fade = Math.max(0, 1 - s / reach);
+          const lum = pwr * 0.75 * fade;
+          const r = clip(Math.round(tint[0] * lum * 255), 0, 255);
+          const g = clip(Math.round(tint[1] * lum * 255), 0, 255);
+          const b = clip(Math.round(tint[2] * lum * 255), 0, 255);
+          if (Math.max(r, g, b) > Math.max(rBuf[idx], gBuf[idx], bBuf[idx])) {
+            charBuf[idx] = ch;
+            rBuf[idx] = r; gBuf[idx] = g; bBuf[idx] = b;
+          }
+        }
+      }
+    }
+
+    // Filled 5-pointed star polygon on top
+    const poly = makeStarPoly(cx, cy, size * 1.15, size * 0.48, ASPECT);
+    const minY = Math.max(0, Math.floor(cy - size * 1.4));
+    const maxY = Math.min(ROWS - 1, Math.ceil(cy + size * 1.4));
+    const minX = Math.max(0, Math.floor(cx - size * 2.4));
+    const maxX = Math.min(COLS - 1, Math.ceil(cx + size * 2.4));
+
+    for (let ry = minY; ry <= maxY; ry++) {
+      for (let rx = minX; rx <= maxX; rx++) {
+        if (pointInPoly(rx, ry, poly)) {
+          const d = Math.hypot((rx - cx) * ASPECT, ry - cy) / (size * 1.15);
+          const ch = repeatCharCode(ry, rx);
+          const glow = clip(pwr * (1.2 - 0.3 * d), 0.55, 1.35);
+          putCell(ry, rx, ch, tint, glow);
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // Scene & Canvas Setup
+  // =========================================================================
+  const scene = buildScene();
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = CANVAS_W * dpr;
+  canvas.height = CANVAS_H * dpr;
+  ctx.scale(dpr, dpr);
+
+  function fitCanvas() {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const scale = Math.min(vw / CANVAS_W, vh / CANVAS_H);
+    canvas.style.width = Math.floor(CANVAS_W * scale) + 'px';
+    canvas.style.height = Math.floor(CANVAS_H * scale) + 'px';
+  }
+  fitCanvas();
+  window.addEventListener('resize', fitCanvas);
+
+  const MONO_FONT = `${FONT_PX}px Consolas, Menlo, "DejaVu Sans Mono", "Courier New", monospace`;
+  const CJK_FONT  = `600 ${CJK_PX}px "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif`;
+  const HUD_FONT  = `${HUD_PX}px Consolas, Menlo, "DejaVu Sans Mono", "Courier New", monospace`;
+
+  // Light direction (front-right-top)
+  const LX = 0.45, LY = 0.52, LZ = 0.72;
+
+  // =========================================================================
+  // Main Render Function for time t (seconds)
+  // =========================================================================
+  const projTmp = [0, 0, 0];
+
+  function renderFrame(t) {
+    charBuf.fill(0);
+    rBuf.fill(0);
+    gBuf.fill(0);
+    bBuf.fill(0);
+    zBuf.fill(1e9);
+
+    // 1. Dotted perspective ground field
+    const gpts = scene.groundPts;
+    for (let i = 0; i < gpts.length; i++) {
+      const gp = gpts[i];
+      const idx = gp.row * COLS + gp.col;
+      charBuf[idx] = 46; // '.'
+      rBuf[idx] = gp.r;
+      gBuf[idx] = gp.g;
+      bBuf[idx] = gp.b;
+      zBuf[idx] = 90.0;
+    }
+
+    // 2. Falling snow (background layer)
+    const snow = scene.snow;
+    for (let i = 0; i < snow.length; i++) {
+      const f = snow[i];
+      if (f.layer > 0.72) continue;
+      const sx = ((f.x + f.vx * t + Math.sin(t * 0.9 + f.phase) * f.amp) % COLS + COLS) % COLS;
+      const sy = (f.y + f.vy * t) % ROWS;
+      const col = Math.floor(sx);
+      const row = Math.floor(sy);
+      const idx = row * COLS + col;
+      const br = f.bright * (0.8 + 0.2 * Math.sin(t * 2.5 + f.phase));
+      charBuf[idx] = f.ch.charCodeAt(0);
+      rBuf[idx] = Math.round(195 * br);
+      gBuf[idx] = Math.round(210 * br);
+      bBuf[idx] = Math.round(235 * br);
+      zBuf[idx] = 85.0;
+    }
+
+    // 3. 3D Scene Rotation (matches ~17.57 deg/sec from video)
+    const rotRad = t * (17.57 * Math.PI / 180);
+    const cosA = Math.cos(rotRad);
+    const sinA = Math.sin(rotRad);
+
+    const q = scene.q;
+    const len = q.len;
+
+    for (let i = 0; i < len; i++) {
+      const t0 = q.t0[i];
+      if (t < t0) continue;
+
+      const dt = t - t0;
+      const ptype = q.type[i];
+
+      let px = q.x[i], py = q.y[i], pz = q.z[i];
+
+      // Pop-in scale for baubles and gifts
+      if (q.pop[i] && dt < 0.35) {
+        const sc = smoothstep(dt / 0.35);
+        px = q.cx[i] + (px - q.cx[i]) * sc;
+        py = q.cy[i] + (py - q.cy[i]) * sc;
+        pz = q.cz[i] + (pz - q.cz[i]) * sc;
+      }
+
+      const rx = px * cosA - pz * sinA;
+      const rz = px * sinA + pz * cosA;
+      const rnx = q.nx[i] * cosA - q.nz[i] * sinA;
+      const rnz = q.nx[i] * sinA + q.nz[i] * cosA;
+
+      const dz = CAM_DIST - rz;
+      if (dz <= 0.3) continue;
+
+      const invZ = FOCAL / dz;
+      const col = Math.round(COLS * 0.5 + rx * invZ);
+      const row = Math.round(CENTER_ROW - (py - CAM_Y) * invZ * ASPECT);
+      if (col < 0 || col >= COLS || row < 0 || row >= ROWS) continue;
+
+      const idx = row * COLS + col;
+      if (dz >= zBuf[idx]) continue;
+
+      // Lighting & shading
+      const rny = q.ny[i];
+      const ndl = Math.max(0, rnx * LX + rny * LY + rnz * LZ);
+      let lum = (0.36 + 0.78 * ndl) * q.base[i];
+
+      let cr = q.r[i], cg = q.g[i], cb = q.b[i];
+
+      if (ptype === PT_BALL) {
+        const spec = Math.pow(Math.max(0, rnx * 0.35 + rny * 0.55 + rnz * 0.76), 9);
+        lum += spec * 0.7;
+      } else if (ptype === PT_TINSEL) {
+        const shimmer = 0.72 + 0.50 * Math.sin(t * 6.0 + q.phase[i]);
+        lum = (0.55 + 0.65 * ndl) * shimmer;
+      } else if (ptype === PT_LIGHT) {
+        const tw = 0.55 + 0.65 * (0.5 + 0.5 * Math.sin(t * 4.8 + q.phase[i]));
+        lum = tw * 1.25;
+      } else if (ptype === PT_GIFT) {
+        lum = 0.42 + 0.72 * ndl;
+      }
+
+      // Growing wavefront white flash
+      let birthFlash = 0;
+      if (ptype === PT_NEEDLE || ptype === PT_SNOW || ptype === PT_TRUNK) {
+        if (dt < 0.28) birthFlash = Math.pow(1 - dt / 0.28, 1.6);
+      } else if (ptype === PT_TINSEL) {
+        if (dt < 0.22) birthFlash = Math.pow(1 - dt / 0.22, 1.4);
+      }
+
+      if (birthFlash > 0) {
+        cr = cr + (1 - cr) * birthFlash;
+        cg = cg + (1 - cg) * birthFlash;
+        cb = cb + (1 - cb) * birthFlash;
+        lum = Math.max(lum, 0.92 + 0.35 * birthFlash);
+      }
+
+      zBuf[idx] = dz;
+      charBuf[idx] = repeatCharCode(row, col);
+
+      const scaleCol = clip(0.48 + 0.85 * lum, 0, 1.35);
+      rBuf[idx] = clip(Math.round(cr * scaleCol * 255), 0, 255);
+      gBuf[idx] = clip(Math.round(cg * scaleCol * 255), 0, 255);
+      bBuf[idx] = clip(Math.round(cb * scaleCol * 255), 0, 255);
+    }
+
+    // 4. Foreground snow flakes
+    for (let i = 0; i < snow.length; i++) {
+      const f = snow[i];
+      if (f.layer <= 0.72) continue;
+      const sx = ((f.x + f.vx * t + Math.sin(t * 0.9 + f.phase) * f.amp) % COLS + COLS) % COLS;
+      const sy = (f.y + f.vy * t) % ROWS;
+      const col = Math.floor(sx);
+      const row = Math.floor(sy);
+      const idx = row * COLS + col;
+      const br = f.bright * (0.82 + 0.18 * Math.sin(t * 3.0 + f.phase));
+      charBuf[idx] = f.ch.charCodeAt(0);
+      rBuf[idx] = Math.round(235 * br);
+      gBuf[idx] = Math.round(242 * br);
+      bBuf[idx] = Math.round(255 * br);
+    }
+
+    // 5. Star at top of tree (t >= T_STAR)
+    if (t >= T_STAR) {
+      const on = smoothstep((t - T_STAR) / 0.5);
+      const flash = Math.pow(clip(1 - (t - T_STAR) / 1.0, 0, 1), 2);
+      if (projectPoint(0, Y1 + 0.09, 0, projTmp)) {
+        const starSize = 2.0 + 2.2 * on;
+        const starPower = 1.05 + 0.08 * Math.sin(t * 4.0);
+        drawStar(projTmp[0], projTmp[1], starSize, t, starPower, flash);
+      }
+    }
+
+    // 6. Typewriter festive message (t > T_MSG)
+    if (t > T_MSG) {
+      const row = ROWS - 9;
+      const x0 = Math.floor((COLS - MESSAGE.length) / 2);
+      const shown = Math.min(MESSAGE.length, Math.floor((t - T_MSG) * 10));
+      const cStart = Math.max(x0 - 3, 0);
+      const cEnd = Math.min(COLS, x0 + shown + 3);
+      for (let ry = row - 1; ry <= row + 1; ry++) {
+        for (let rx = cStart; rx < cEnd; rx++) {
+          charBuf[ry * COLS + rx] = 0;
+        }
+      }
+      const palette = [RED, GOLD, GREEN_BOX];
+      for (let i = 0; i < shown; i++) {
+        const ch = MESSAGE[i];
+        if (ch !== ' ') {
+          const tint = palette[(Math.floor(i / 2) + Math.floor(t * 1.5)) % 3];
+          const pulse = 0.85 + 0.25 * Math.sin(t * 5 + i * 0.5);
+          putCell(row, x0 + i, ch.charCodeAt(0), tint, pulse);
+        }
+      }
+    }
+
+    // Count active non-space ASCII letters
+    let letterCount = 0;
+    for (let i = 0; i < TOTAL_CELLS; i++) {
+      if (charBuf[i] > 32) letterCount++;
+    }
+
+    // Count active fairy lights
+    let activeLights = 0;
+    const lst = scene.lightStartTimes;
+    for (let i = 0; i < lst.length; i++) {
+      if (t >= lst[i]) activeLights++;
+      else break;
+    }
+
+    // =======================================================================
+    // Draw ASCII Grid to Canvas
+    // =======================================================================
+    ctx.fillStyle = '#02060a';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    let lastStyle = '';
+    let lastFont = '';
+    for (let r = 0; r < ROWS; r++) {
+      const py = r * CH + CH * 0.52;
+      const rowOff = r * COLS;
+      for (let c = 0; c < COLS; c++) {
+        const idx = rowOff + c;
+        const code = charBuf[idx];
+        if (code <= 32) continue;
+        const font = code > 127 ? CJK_FONT : MONO_FONT;
+        if (font !== lastFont) {
+          ctx.font = font;
+          lastFont = font;
+        }
+        const rr = rBuf[idx] & 0xfc;
+        const gg = gBuf[idx] & 0xfc;
+        const bb = bBuf[idx] & 0xfc;
+        const style = `rgb(${rr},${gg},${bb})`;
+        if (style !== lastStyle) {
+          ctx.fillStyle = style;
+          lastStyle = style;
+        }
+        ctx.fillText(String.fromCharCode(code), c * CW + CW * 0.5, py);
+      }
+    }
+
+    // =======================================================================
+    // Draw Minimal HUD matching the video
+    // =======================================================================
+    ctx.font = HUD_FONT;
+    ctx.textBaseline = 'top';
+
+    // Top-right: • t = 00.00s
+    const timeStr = t.toFixed(2).padStart(5, '0');
+    ctx.textAlign = 'right';
+    ctx.fillStyle = HUD_ACCENT;
+    ctx.fillText(`• t = ${timeStr}s`, CANVAS_W - 14, 14);
+
+    // Bottom-left telemetry
+    const rotDeg = ((rotRad * 180 / Math.PI) % 360).toFixed(2).padStart(6, '0');
+    const lettersStr = letterCount.toLocaleString('en-US');
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = HUD_SIGN;
+    ctx.fillText('MERRY CHRISTMAS', 14, CANVAS_H - 64);
+
+    ctx.fillStyle = HUD_DIM;
+    ctx.fillText(`rotation ${rotDeg}°    lights ${activeLights}`, 14, CANVAS_H - 42);
+    ctx.fillText(`letters ${lettersStr}`, 14, CANVAS_H - 22);
+  }
+
+  // =========================================================================
+  // Animation Loop (smooth 30 fps cadence like the video) & Controls
+  // =========================================================================
+  let simTime = 0;
+  let paused = false;
+  let lastNow = performance.now();
+  let accum = 0;
+  const FRAME_STEP = 1 / 30;
+
+  function tick(now) {
+    requestAnimationFrame(tick);
+    const dt = Math.min((now - lastNow) / 1000, 0.1);
+    lastNow = now;
+
+    if (!paused) {
+      simTime += dt;
+      accum += dt;
+      if (accum >= FRAME_STEP * 0.85) {
+        accum = 0;
+        renderFrame(simTime);
+      }
+    }
+  }
+
+  // Initial render so frame 0 is never blank
+  renderFrame(0);
+  requestAnimationFrame(tick);
+
+  // Quiet keyboard shortcuts matching christmas_tree.py
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') {
+      e.preventDefault();
+      paused = !paused;
+      lastNow = performance.now();
+    } else if (e.key === 'r' || e.key === 'R') {
+      simTime = 0;
+      paused = false;
+      lastNow = performance.now();
+      renderFrame(0);
+    } else if (e.key === 's' || e.key === 'S') {
+      const a = document.createElement('a');
+      a.download = `ascii-christmas-tree-${simTime.toFixed(1)}s.png`;
+      a.href = canvas.toDataURL('image/png');
+      a.click();
+    }
+  });
+
+  // =========================================================================
+  // Background Music: "We Wish You a Merry Christmas" (Web Audio Music Box)
+  // =========================================================================
+  const NOTE_FREQ = {
+    'G2': 98.00,  'A2': 110.00, 'B2': 123.47, 'C3': 130.81, 'D3': 146.83,
+    'E3': 164.81, 'F#3': 185.00,'G3': 196.00, 'A3': 220.00, 'B3': 246.94,
+    'C4': 261.63, 'D4': 293.66, 'E4': 329.63, 'F#4': 369.99,'G4': 392.00,
+    'A4': 440.00, 'B4': 493.88, 'C5': 523.25, 'D5': 587.33
+  };
+
+  // [melodyNote, beats, chordNotes (optional)] in G major, 3/4 time
+  const SCORE = [
+    ['D4', 1.0, ['G3', 'B3']],
+    // We wish you a Merry Christmas
+    ['G4', 1.0, ['G3', 'B3', 'D4']],
+    ['G4', 0.5, null], ['A4', 0.5, null], ['G4', 0.5, null], ['F#4', 0.5, null],
+    ['E4', 1.0, ['C3', 'G3', 'C4']],
+    ['E4', 1.0, null],
+    ['E4', 1.0, null],
+    // We wish you a Merry Christmas
+    ['A4', 1.0, ['A3', 'C4', 'E4']],
+    ['A4', 0.5, null], ['B4', 0.5, null], ['A4', 0.5, null], ['G4', 0.5, null],
+    ['F#4', 1.0, ['D3', 'A3', 'D4']],
+    ['D4', 1.0, null],
+    ['D4', 1.0, null],
+    // We wish you a Merry Christmas
+    ['B4', 1.0, ['G3', 'B3', 'D4']],
+    ['B4', 0.5, null], ['C5', 0.5, null], ['B4', 0.5, null], ['A4', 0.5, null],
+    ['G4', 1.0, ['E3', 'B3', 'E4']],
+    ['E4', 1.0, null],
+    ['D4', 0.5, null], ['D4', 0.5, null],
+    // And a Happy New Year!
+    ['E4', 1.0, ['C3', 'G3', 'C4']],
+    ['A4', 1.0, ['A2', 'E3', 'A3']],
+    ['F#4', 1.0, ['D3', 'A3', 'D4']],
+    ['G4', 2.0, ['G3', 'B3', 'D4']],
+    ['D4', 1.0, null],
+    // Good tidings we bring to you and your kin
+    ['G4', 1.0, ['G3', 'B3', 'D4']],
+    ['G4', 1.0, null],
+    ['G4', 1.0, null],
+    ['F#4', 2.0, ['D3', 'A3', 'D4']],
+    ['F#4', 1.0, null],
+    ['G4', 1.0, ['E3', 'G3', 'B3']],
+    ['F#4', 1.0, null],
+    ['E4', 1.0, null],
+    ['D4', 2.0, ['D3', 'F#3', 'A3']],
+    ['A4', 1.0, null],
+    // Good tidings for Christmas and a Happy New Year
+    ['B4', 1.0, ['G3', 'B3', 'D4']],
+    ['A4', 1.0, ['D3', 'F#3', 'A3']],
+    ['G4', 1.0, ['E3', 'G3', 'B3']],
+    ['D5', 1.0, ['G3', 'B3', 'D4']],
+    ['D4', 1.0, null],
+    ['D4', 0.5, null], ['D4', 0.5, null],
+    ['E4', 1.0, ['C3', 'G3', 'C4']],
+    ['A4', 1.0, ['A2', 'E3', 'A3']],
+    ['F#4', 1.0, ['D3', 'A3', 'D4']],
+    ['G4', 2.5, ['G3', 'B3', 'D4']],
+    [null, 0.5, null]
+  ];
+
+  const BEAT_SEC = 60 / 138;
+  let audioCtx = null;
+  let masterGain = null;
+  let bgmTimer = null;
+  let scoreIdx = 0;
+  let nextNoteTime = 0;
+  let musicEnabled = true;
+  let musicStarted = false;
+
+  const bgmBtn = document.getElementById('bgmToggle');
+
+  function updateBgmLabel() {
+    if (musicEnabled) {
+      bgmBtn.textContent = '♪ 音樂：開';
+      bgmBtn.classList.remove('muted');
+    } else {
+      bgmBtn.textContent = '♪ 音樂：關';
+      bgmBtn.classList.add('muted');
+    }
+  }
+
+  function playBellNote(freq, startTime, duration, gainScale = 1.0) {
+    if (!audioCtx || !masterGain) return;
+    const osc1 = audioCtx.createOscillator();
+    const osc2 = audioCtx.createOscillator();
+    const g1 = audioCtx.createGain();
+    const g2 = audioCtx.createGain();
+
+    osc1.type = 'sine';
+    osc1.frequency.setValueAtTime(freq, startTime);
+
+    osc2.type = 'triangle';
+    osc2.frequency.setValueAtTime(freq * 2, startTime);
+
+    const peak = 0.16 * gainScale;
+    g1.gain.setValueAtTime(0.0001, startTime);
+    g1.gain.linearRampToValueAtTime(peak, startTime + 0.012);
+    g1.gain.exponentialRampToValueAtTime(0.0001, startTime + Math.max(duration * 1.35, 0.45));
+
+    g2.gain.setValueAtTime(0.0001, startTime);
+    g2.gain.linearRampToValueAtTime(peak * 0.22, startTime + 0.008);
+    g2.gain.exponentialRampToValueAtTime(0.0001, startTime + Math.max(duration * 0.65, 0.2));
+
+    osc1.connect(g1).connect(masterGain);
+    osc2.connect(g2).connect(masterGain);
+
+    const stopAt = startTime + Math.max(duration * 1.4, 0.5);
+    osc1.start(startTime);
+    osc2.start(startTime);
+    osc1.stop(stopAt);
+    osc2.stop(stopAt);
+  }
+
+  function scheduleMusic() {
+    if (!audioCtx || !musicEnabled || audioCtx.state !== 'running') return;
+    while (nextNoteTime < audioCtx.currentTime + 0.25) {
+      const [note, beats, chord] = SCORE[scoreIdx];
+      const dur = beats * BEAT_SEC;
+      if (note && NOTE_FREQ[note]) {
+        playBellNote(NOTE_FREQ[note], nextNoteTime, dur, 1.0);
+      }
+      if (chord) {
+        for (let i = 0; i < chord.length; i++) {
+          const cf = NOTE_FREQ[chord[i]];
+          if (cf) playBellNote(cf, nextNoteTime, dur * 2.2, 0.26);
+        }
+      }
+      nextNoteTime += dur;
+      scoreIdx = (scoreIdx + 1) % SCORE.length;
+    }
+  }
+
+  function startAudio() {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    if (!audioCtx) {
+      audioCtx = new AudioCtx();
+      masterGain = audioCtx.createGain();
+      masterGain.gain.value = 0.7;
+      masterGain.connect(audioCtx.destination);
+    }
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume().then(() => {
+        if (audioCtx.state === 'running') {
+          musicStarted = true;
+          nextNoteTime = audioCtx.currentTime + 0.05;
+          if (!bgmTimer) bgmTimer = setInterval(scheduleMusic, 80);
+          updateBgmLabel();
+        }
+      }).catch(() => {});
+    } else if (audioCtx.state === 'running') {
+      musicStarted = true;
+      if (!bgmTimer) {
+        nextNoteTime = audioCtx.currentTime + 0.05;
+        bgmTimer = setInterval(scheduleMusic, 80);
+      }
+      updateBgmLabel();
+    }
+  }
+
+  function toggleMusic() {
+    if (!musicStarted) {
+      musicEnabled = true;
+      startAudio();
+      return;
+    }
+    musicEnabled = !musicEnabled;
+    if (masterGain && audioCtx) {
+      masterGain.gain.setTargetAtTime(musicEnabled ? 0.7 : 0.0, audioCtx.currentTime, 0.03);
+      if (musicEnabled) {
+        nextNoteTime = audioCtx.currentTime + 0.05;
+      }
+    }
+    updateBgmLabel();
+  }
+
+  bgmBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleMusic();
+  });
+
+  // Auto-start immediately on load; if browser autoplay policy suspends AudioContext,
+  // unlock seamlessly on the very first touch, click, or keypress anywhere.
+  startAudio();
+  updateBgmLabel();
+
+  function unlockOnGesture() {
+    if (musicEnabled && (!musicStarted || (audioCtx && audioCtx.state === 'suspended'))) {
+      startAudio();
+    }
+  }
+  window.addEventListener('pointerdown', unlockOnGesture, { capture: true });
+  window.addEventListener('touchstart', unlockOnGesture, { capture: true, passive: true });
+  window.addEventListener('click', unlockOnGesture, { capture: true });
+
+  window.addEventListener('keydown', (e) => {
+    unlockOnGesture();
+    if (e.key === 'm' || e.key === 'M') {
+      toggleMusic();
+    }
+  });
+
+  // Double-tap / double-click to restart cleanly on mobile/tablet/desktop (first tap also unlocks audio)
+  let lastTap = 0;
+  canvas.addEventListener('pointerdown', () => {
+    if (!musicStarted && musicEnabled) startAudio();
+    const now = performance.now();
+    if (now - lastTap < 350) {
+      simTime = 0;
+      paused = false;
+      lastNow = performance.now();
+      renderFrame(0);
+    }
+    lastTap = now;
+  });
+})();
+</script>
+</body>
+</html>
